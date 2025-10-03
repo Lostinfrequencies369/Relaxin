@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no, maximum-scale=1">
+<title>Relax Effects — v11 UI Fix + Recorder</title>
+<style>
+  :root{
+    --ui-bg: rgba(0,0,0,.38);
+    --ui-text: #f3fbff;
+    --ui-shadow: 0 10px 24px rgba(0,0,0,.35);
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{ margin:0; overflow:hidden; background:#000;
+    font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;}
+  #stage{position:fixed; inset:0; width:100%; height:100%; display:block; touch-action:none; z-index:0;}
+  /* ----- Responsive Dock ----- */
+  .dock{
+    position:fixed; left:12px; right:12px;
+    bottom:calc(12px + env(safe-area-inset-bottom, 0px));
+    z-index:5;
+    display:flex; flex-wrap:wrap; gap:10px;
+    align-items:center; justify-content:flex-start; pointer-events:auto;
+    max-width:100vw;
+  }
+  .rowbar{ display:flex; gap:10px; align-items:center; flex:1 1 auto; min-width:0; }
+  .btn{
+    min-width:44px; height:44px; border-radius:999px; padding:0 14px;
+    display:flex; align-items:center; gap:10px; cursor:pointer; user-select:none;
+    color:var(--ui-text); background:var(--ui-bg); box-shadow:var(--ui-shadow);
+    backdrop-filter: blur(10px); font-weight:700; font-size:14px;
+    white-space:nowrap;
+  }
+  .btn.icon{ width:48px; min-width:48px; justify-content:center; padding:0; font-size:18px;}
+  .btn.stretch{ flex: 1 1 240px; min-width:200px; }
+  .slider{ appearance:none; width:100%; height:6px; border-radius:999px; background:rgba(255,255,255,.25); outline:none; }
+  .slider::-webkit-slider-thumb{ appearance:none; width:18px; height:18px; border-radius:50%; background:#fff; box-shadow:0 2px 8px rgba(0,0,0,.35); }
+  .badge{ font-size:12px; opacity:.9; padding:2px 8px; border-radius:999px; background:rgba(255,255,255,.12); }
+  .on{ box-shadow:0 0 0 2px rgba(255,255,255,.35), var(--ui-shadow); }
+  /* Panels always on top + scrollable */
+  .panel{
+    position:fixed; right:12px; bottom:calc(64px + env(safe-area-inset-bottom, 0px));
+    z-index:6; display:none;
+    background:var(--ui-bg); color:var(--ui-text);
+    padding:12px; border-radius:16px; box-shadow:var(--ui-shadow);
+    backdrop-filter: blur(12px); max-height:70vh; overflow:auto; min-width:320px; pointer-events:auto;
+  }
+  .row{ display:flex; align-items:center; gap:10px; padding:8px 10px; border-radius:12px; cursor:pointer; }
+  .row:hover{ background: rgba(255,255,255,.08); }
+  .ico{ width:32px; height:32px; display:grid; place-items:center; font-size:18px; }
+  .label{ font-size:15px; font-weight:700; }
+  .preview{ margin-left:auto; width:74px; height:26px; border-radius:6px; box-shadow: inset 0 0 0 1px rgba(255,255,255,.15); }
+  @media (max-width: 520px){
+    .panel{ right:12px; left:12px; bottom:calc(100px + env(safe-area-inset-bottom, 0px)); min-width:unset; }
+  }
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+
+<div class="dock">
+  <div class="rowbar" style="flex:1 1 460px; min-width:260px;">
+    <div class="btn icon" id="effectBtn" title="Effects">✨</div>
+    <div class="btn icon" id="themeBtn" title="Themes">🎨</div>
+    <div class="btn icon" id="drawBtn" title="Draw Mode (line overlay)">✏️</div>
+    <div class="btn" id="qualityBtn" title="Quality">Quality <span id="qBadge" class="badge">Med</span></div>
+  </div>
+  <div class="btn stretch" title="Speed">
+    <span>Speed</span>
+    <input id="speed" class="slider" type="range" min="60" max="160" value="95">
+    <span class="badge" id="spdB">0.95×</span>
+  </div>
+  <div class="btn" id="recBtn" title="Record 10s">⏺️ <span id="recLabel">Record</span> <span class="badge" id="recTime">00.0</span></div>
+  <a class="btn" id="dlBtn" download="relax_effects_recording.webm" style="display:none" title="Download recording">⬇️ Download</a>
+</div>
+
+<div class="panel" id="effectPanel"></div>
+<div class="panel" id="themePanel"></div>
+
+<script>
+(() => {
+  let dpr = 1;
+  const canvas = document.getElementById('stage');
+  canvas.style.touchAction = 'none';
+  const ctx = canvas.getContext('2d', { alpha: false });
+  let W=0,H=0, SCALE=1;
+
+  // Quality
+  const QUALITY = ["Low","Med","High"]; let qIndex=1;
+  const qBadge = document.getElementById('qBadge');
+  let MAX=1800; function capByQuality(){ MAX = qIndex===2?2400 : qIndex===1?1800 : 1200; }
+  document.getElementById('qualityBtn').onclick = ()=>{ qIndex=(qIndex+1)%QUALITY.length; qBadge.textContent=QUALITY[qIndex]; capByQuality(); };
+
+  // Themes
+  const THEMES = [
+    { name:'Ocean Calm',  sym:'🌊', type:'solid', cols:['#9ff7e8','#67e2c9','#b2fff7'], bg:'#071a1a', tint:'rgba(5,18,19,0.06)' },
+    { name:'Purple Dusk', sym:'🌌', type:'solid', cols:['#f3b8ff','#c5a1ff','#9dbbff'], bg:'#100a1a', tint:'rgba(14,10,24,0.06)' },
+    { name:'Sunset Pop',  sym:'🌅', type:'solid', cols:['#ffd479','#ff7f7f','#ff9df2'], bg:'#200808', tint:'rgba(30,8,8,0.06)' },
+    { name:'Forest Mist', sym:'🌳', type:'solid', cols:['#bafbd8','#8de0bf','#d4ffe6'], bg:'#071512', tint:'rgba(6,15,12,0.06)' },
+    { name:'Aurora Neon', sym:'🌈', type:'solid', cols:['#6df7ff','#77ff85','#b577ff'], bg:'#081226', tint:'rgba(9,12,20,0.06)' },
+    { name:'Sea Gradient', sym:'🟦', type:'grad', cols:['#0b2a3a','#0f4257','#127a8a'], tint:'rgba(0,0,0,0.08)' },
+    { name:'Mauve Sunrise', sym:'🟣', type:'grad', cols:['#1a0b2e','#3a1f62','#ff76e1'], tint:'rgba(0,0,0,0.07)' },
+    { name:'Citrus Glow', sym:'🟧', type:'grad', cols:['#140a05','#7a2f0a','#ffb34d'], tint:'rgba(0,0,0,0.06)' },
+    { name:'Forest Gradient', sym:'🟩', type:'grad', cols:['#06110b','#0f3a23','#1e7a49'], tint:'rgba(0,0,0,0.07)' }
+  ];
+  let theme = THEMES[0];
+
+  // Effects
+  const EFFECTS = [
+    {name:'Soft Ripples', sym:'💧'},
+    {name:'Floral Burst', sym:'🌸'},
+    {name:'Dissolve Puff', sym:'☁️'},
+    {name:'Sparkle Trail', sym:'✨'},
+    {name:'Fireflies', sym:'🔥'},
+    {name:'Aurora Line', sym:'🌈'},
+    {name:'Smoke Drift', sym:'💨'},
+    {name:'Rain Streaks', sym:'💦'},
+    {name:'Star Burst', sym:'🌟'},
+    {name:'Bubble Rise', sym:'🫧'}
+  ];
+  let effectMode = 8;
+
+  // Panels
+  const effectPanel = document.getElementById('effectPanel');
+  const themePanel  = document.getElementById('themePanel');
+  function buildPanels(){
+    effectPanel.innerHTML='';
+    EFFECTS.forEach((t,i)=>{
+      const row=document.createElement('div'); row.className='row';
+      const ico=document.createElement('div'); ico.className='ico'; ico.textContent=t.sym;
+      const lab=document.createElement('div'); lab.className='label'; lab.textContent=t.name;
+      row.appendChild(ico); row.appendChild(lab);
+      row.onclick=()=>{ effectMode=i; effectPanel.style.display='none'; };
+      effectPanel.appendChild(row);
+    });
+    themePanel.innerHTML='';
+    THEMES.forEach((t,i)=>{
+      const row=document.createElement('div'); row.className='row';
+      const ico=document.createElement('div'); ico.className='ico'; ico.textContent=t.sym;
+      const lab=document.createElement('div'); lab.className='label'; lab.textContent=t.name;
+      const prev=document.createElement('div'); prev.className='preview';
+      prev.style.background = t.type==='grad' ? `linear-gradient(135deg, ${t.cols[0]}, ${t.cols[1]}, ${t.cols[2]})` : t.bg;
+      row.appendChild(ico); row.appendChild(lab); row.appendChild(prev);
+      row.onclick=()=>{ theme=THEMES[i]; themePanel.style.display='none'; cachedGrad=null; };
+      themePanel.appendChild(row);
+    });
+  }
+  buildPanels();
+
+  // Toggle panels (ensure mutual)
+  function togglePanel(panel){
+    if(panel===effectPanel) themePanel.style.display='none';
+    if(panel===themePanel) effectPanel.style.display='none';
+    panel.style.display = panel.style.display==='block' ? 'none' : 'block';
+  }
+  document.getElementById('effectBtn').addEventListener('click', (e)=>{ e.preventDefault(); togglePanel(effectPanel); }, {passive:false});
+  document.getElementById('themeBtn').addEventListener('click', (e)=>{ e.preventDefault(); togglePanel(themePanel); }, {passive:false});
+
+  // Speed
+  const speedEl = document.getElementById('speed'); const spdB=document.getElementById('spdB');
+  let speedMul=0.95; speedEl.addEventListener('input',()=>{ speedMul=parseInt(speedEl.value,10)/100; spdB.textContent=speedMul.toFixed(2)+'×'; });
+
+  // Draw mode toggle
+  let drawMode=true;
+  const drawBtn=document.getElementById('drawBtn');
+  drawBtn.classList.add('on');
+  drawBtn.addEventListener('click', ()=>{ drawMode=!drawMode; drawBtn.classList.toggle('on', drawMode); });
+
+  // Resize + dynamic scale
+  let cachedGrad=null, gradKey='';
+  function resize(){
+    dpr=1; W=canvas.clientWidth; H=canvas.clientHeight;
+    canvas.width=W; canvas.height=H; ctx.setTransform(1,0,0,1,0,0);
+    const base = 1080;
+    SCALE = Math.max(0.6, Math.min(1.6, Math.min(W,H) / base));
+    cachedGrad=null; gradKey='';
+  }
+  window.addEventListener('resize', resize, {passive:true}); resize();
+
+  // Utils
+  const clamp01=x=>Math.max(0,Math.min(1,x));
+  const pick=arr=>arr[(Math.random()*arr.length)|0];
+  const rnd=(a,b)=>a+Math.random()*(b-a);
+  const FLORAL_COLS = Array.from({length:240},(_,i)=>`hsl(${(i*(360/240))|0} 85% 70%)`);
+
+  // Entities
+  const ents=[];
+  function addEnt(o){ if(ents.length>=MAX) ents.shift(); ents.push(o); }
+
+  // Background
+  function getBgFill(){
+    if(theme.type==='grad'){
+      const key=theme.name+'|'+W+'x'+H;
+      if(!cachedGrad||gradKey!==key){
+        const g=ctx.createLinearGradient(0,0,W,H);
+        const c=theme.cols, n=c.length; for(let i=0;i<n;i++) g.addColorStop(i/(n-1), c[i]);
+        cachedGrad=g; gradKey=key;
+      }
+      return cachedGrad;
+    } else return theme.bg;
+  }
+  function drawBG(){ ctx.fillStyle=getBgFill(); ctx.fillRect(0,0,W,H); ctx.fillStyle=theme.tint||'transparent'; ctx.fillRect(0,0,W,H); }
+
+  // Draw trails (line overlay)
+  const TRAIL_DURATION = 3.6, TRAIL_BASE = 12;
+  const paths=[]; let timeNow=0;
+  function makePath(id, x, y){
+    const color = pick(theme.cols || ['#ffffff']);
+    const p = { id, points:[{x,y,t:timeNow}], color, dead:false };
+    paths.push(p); return p;
+  }
+  function addPoint(p, x, y){
+    const pts=p.points; const last=pts[pts.length-1];
+    const dx=x-last.x, dy=y-last.y; const dist=Math.hypot(dx,dy);
+    if(dist<2) return;
+    pts.push({x,y,t:timeNow});
+  }
+  function endPath(p){ p.dead=true; createAfterglow(p); }
+  function drawPaths(){
+    if(!drawMode) return;
+    ctx.lineCap='round'; ctx.lineJoin='round';
+    for(let i=paths.length-1;i>=0;i--){
+      const p=paths[i]; const pts=p.points;
+      while(pts.length && timeNow - pts[0].t > TRAIL_DURATION) pts.shift();
+      if(pts.length<=1 && p.dead){ paths.splice(i,1); continue; }
+      for(let j=0;j<pts.length-1;j++){
+        const a0 = 1 - clamp01((timeNow - pts[j].t) / TRAIL_DURATION);
+        const a1 = 1 - clamp01((timeNow - pts[j+1].t) / TRAIL_DURATION);
+        const a = (a0 + a1) * 0.5;
+        const width = SCALE * TRAIL_BASE * (0.35 + (1 - a) * 1.25);
+        const alpha = 0.45 * Math.pow(a, 1.1);
+        ctx.globalAlpha = alpha; ctx.strokeStyle = p.color; ctx.lineWidth = width;
+        ctx.beginPath(); ctx.moveTo(pts[j].x, pts[j].y); ctx.lineTo(pts[j+1].x, pts[j+1].y); ctx.stroke();
+      }
+      ctx.globalAlpha=1;
+    }
+  }
+
+  // Afterglow = selected effect
+  const afterglows=[];
+  function pathLength(pts){ let d=0; for(let i=1;i<pts.length;i++){ const dx=pts[i].x-pts[i-1].x, dy=pts[i].y-pts[i-1].y; d+=Math.hypot(dx,dy); } return d; }
+  function pointAt(pts, u){
+    let total=0; for(let i=1;i<pts.length;i++){ total+=Math.hypot(pts[i].x-pts[i-1].x, pts[i].y-pts[i-1].y); }
+    if(total<=0) return pts[0];
+    let d=u*total, acc=0;
+    for(let i=1;i<pts.length;i++){
+      const a=pts[i-1], b=pts[i];
+      const seg=Math.hypot(b.x-a.x,b.y-a.y);
+      if(acc+seg>=d){ const t=(d-acc)/seg; return {x:a.x+(b.x-a.x)*t, y:a.y+(b.y-a.y)*t}; }
+      acc+=seg;
+    }
+    return pts[pts.length-1];
+  }
+  function createAfterglow(path){
+    const pts = path.points.slice(); if(pts.length<2) return;
+    const len = pathLength(pts);
+    const duration = Math.min(6.5, Math.max(3.2, len/230));
+    afterglows.push({ pts, len, time:0, life:duration, cycles:2, head:0, col: path.color, effect: effectMode });
+  }
+
+  // Effect helpers
+  function addRipple(x,y,life,r, lw, col){ addEnt({m:0,x,y,t:0,life, r1:r*SCALE, lw:(lw||1.6)*SCALE, col}); }
+  function addPetal(x,y,life,dx,dy,rot,w,h,col){ addEnt({m:1,x,y,t:0,life, dx:dx*SCALE, dy:dy*SCALE, rot, w:w*SCALE, h:h*SCALE, col}); }
+  function addCenterPuff(x,y,life,r1,col){ addEnt({m:10,x,y,t:0,life, r1:r1*SCALE, col}); }
+  function addDissolve(x,y,life,r,col){ addEnt({m:2,x,y,t:0,life, r1:r*SCALE, col}); }
+  function addSpark(x,y,life,vx,vy,s,col){ addEnt({m:3,x,y,t:0,life, vx, vy, s:(s||1.8)*SCALE, col}); }
+  function addFirefly(x,y,life,vx,vy,r,col){ addEnt({m:4,x,y,t:0,life, vx, vy, r:(r||3.5)*SCALE, col}); }
+  function addAurora(x,y,life,w,amp,freq,col){ addEnt({m:5,x,y,t:0,life, w:w*SCALE, amp:amp*SCALE, freq, col}); }
+  function addSmoke(x,y,life,vx,vy,r1,col){ addEnt({m:6,x,y,t:0,life, vx, vy, r1:r1*SCALE, col}); }
+  function addRain(x,y,life,vy,len,col){ addEnt({m:7,x:x+rnd(-12,12),y:y-10,t:0,life, vy, len:len*SCALE, col}); }
+  function addStar(x,y,life,ang,dist,col){ addEnt({m:8,x,y,t:0,life, ang, dist:dist*SCALE, col}); }
+  function addBubble(x,y,life,vx,vy,r1,col){ addEnt({m:9,x,y,t:0,life, vx, vy, r1:r1*SCALE, col}); }
+
+  function emitEffectAt(effect,x,y,strength,col){
+    switch(effect){
+      case 0: addRipple(x,y, 1.4+1.0*strength, 120+220*strength, 1.3+0.7*strength, col); break;
+      case 1: { const petals=10+((strength*10)|0), R= 38+60*strength; for(let i=0;i<petals;i++){ const ang=(i/petals)*6.283 + (Math.random()*0.2-0.1); addPetal(x,y, 1.6+0.8*strength, Math.cos(ang)*R, Math.sin(ang)*R, ang+1.57, rnd(10,14), rnd(18,26), `hsl(${(i*15)%360} 85% 70%)`);} addCenterPuff(x,y,1.4+0.8*strength, 30+40*strength, col); break; }
+      case 2: addDissolve(x,y, 1.5+0.8*strength, 40+80*strength, col); break;
+      case 3: for(let i=0;i<5;i++) addSpark(x,y, 1.0+0.6*strength, rnd(-90,90), rnd(-90,90), rnd(1.4,2.4), col); break;
+      case 4: for(let i=0;i<6;i++) addFirefly(x,y, 1.4+0.8*strength, rnd(-36,36), rnd(-36,36), rnd(2.5,4.5), col); break;
+      case 5: addAurora(x,y, 1.8+0.8*strength, rnd(110,180), rnd(10,18), rnd(0.010,0.016), col); break;
+      case 6: for(let i=0;i<4;i++) addSmoke(x,y, 1.6+0.8*strength, rnd(-18,18), rnd(-18,-10), rnd(22,34), col); break;
+      case 7: for(let i=0;i<7;i++) addRain(x,y, 1.2+0.6*strength, rnd(200,280), rnd(16,28), col); break;
+      case 8: for(let i=0;i<10;i++) addStar(x,y, 1.4+0.8*strength, rnd(0,6.283), rnd(100,200), col); break;
+      case 9: for(let i=0;i<7;i++) addBubble(x,y, 1.7+0.9*strength, rnd(-22,22), rnd(-110,-70), rnd(10,18), col); break;
+    }
+  }
+
+  function updateAfterglows(dt){
+    for(let i=afterglows.length-1;i>=0;i--){
+      const ag=afterglows[i];
+      ag.time += dt * speedMul;
+      const k = clamp01(ag.time / ag.life);
+      const strength = (1-k);
+      const speed = 0.35 + 0.85*(1 - k);
+      ag.head += speed * dt;
+      if(ag.head > ag.cycles) ag.head = ag.cycles;
+
+      const baseU = Math.min(1, (ag.head % 1));
+      const spread = 0.02 + 0.03*(1-k);
+      if(ag.head < ag.cycles || k < 1){
+        for(let s=-2; s<=2; s++){
+          let u = baseU + s*spread;
+          while(u<0) u+=1; while(u>1) u-=1;
+          const p = pointAt(ag.pts, u);
+          emitEffectAt(ag.effect, p.x, p.y, strength, pick(theme.cols||['#fff']));
+        }
+      }
+      if(ag.head >= ag.cycles && k>=1){ afterglows.splice(i,1); }
+    }
+  }
+
+  // Entities render
+  function drawEntities(dt){
+    const mul=speedMul;
+    for(let i=ents.length-1;i>=0;i--){
+      const e=ents[i];
+      e.t += dt*mul;
+      const k = Math.max(0, Math.min(1, e.t / (e.life||1)));
+      const grow = 1 - Math.pow(1-k,3);
+      const fade = Math.pow(1-k, 1.25);
+      switch(e.m){
+        case 0:{ if(k>=1){ ents.splice(i,1); break; } const r=(e.r1||140)*grow; ctx.globalAlpha=0.22*fade; ctx.globalCompositeOperation='lighter'; ctx.strokeStyle=e.col; ctx.lineWidth=e.lw||1.6; ctx.beginPath(); ctx.arc(e.x,e.y,r,0,6.283); ctx.stroke(); ctx.globalAlpha=1; ctx.globalCompositeOperation='source-over'; break; }
+        case 1:{ if(k>=1){ ents.splice(i,1); break; } const px=e.x+(e.dx||0)*grow, py=e.y+(e.dy||0)*grow; ctx.save(); ctx.translate(px,py); ctx.rotate(e.rot||0); ctx.globalAlpha=0.7*fade; ctx.fillStyle=e.col; ctx.beginPath(); ctx.moveTo(0, (e.h||20)*0.2); ctx.quadraticCurveTo((e.w||12)*0.5, -(e.h||20)*0.3, (e.w||12), (e.h||20)*0.2); ctx.quadraticCurveTo((e.w||12)*0.5, (e.h||20), 0, (e.h||20)*0.2); ctx.closePath(); ctx.fill(); ctx.restore(); break; }
+        case 10:{ if(k>=1){ ents.splice(i,1); break; } const rr=(e.r1||44)*grow; ctx.globalAlpha=0.30*fade; ctx.fillStyle=e.col; ctx.beginPath(); ctx.arc(e.x,e.y,rr,0,6.283); ctx.fill(); ctx.globalAlpha=1; break; }
+        case 2:{ if(k>=1){ ents.splice(i,1); break; } const r2=(e.r1||60)*grow; ctx.globalAlpha=0.64*fade; ctx.fillStyle=e.col; ctx.beginPath(); ctx.arc(e.x,e.y,r2,0,6.283); ctx.fill(); ctx.globalAlpha=1; break; }
+        case 3:{ if(k>=1){ ents.splice(i,1); break; } e.x+=(e.vx||0)*dt*mul; e.y+=(e.vy||0)*dt*mul; e.vx*=0.990; e.vy*=0.990; ctx.globalCompositeOperation='lighter'; ctx.globalAlpha=0.86*fade; ctx.fillStyle=e.col; const s=(e.s||1.8)*(1+1.0*grow); ctx.fillRect(e.x-s/2, e.y-s/2, s, s); ctx.globalAlpha=1; ctx.globalCompositeOperation='source-over'; break; }
+        case 4:{ if(k>=1){ ents.splice(i,1); break; } e.x+=(e.vx||0)*dt*mul; e.y+=(e.vy||0)*dt*mul; e.vx*=0.988; e.vy*=0.988; ctx.globalCompositeOperation='lighter'; ctx.globalAlpha=0.60*fade; ctx.fillStyle=e.col; const r4=(e.r||3.5)*(1+0.8*grow); ctx.beginPath(); ctx.arc(e.x,e.y,r4,0,6.283); ctx.fill(); ctx.globalAlpha=1; ctx.globalCompositeOperation='source-over'; break; }
+        case 5:{ if(k>=1){ ents.splice(i,1); break; } const len=(e.w||140)*(1-k*0.15); const amp=(e.amp||12)*(1-k*0.4); const f=e.freq||0.012; ctx.globalCompositeOperation='lighter'; ctx.globalAlpha=0.26*fade; ctx.strokeStyle=e.col; ctx.lineWidth=10; ctx.beginPath(); ctx.moveTo(e.x-len/2, e.y); for(let xx=-len/2; xx<=len/2; xx+=5){ const yy=Math.sin((xx + k*60)*f*40)*amp; ctx.lineTo(e.x+xx, e.y+yy);} ctx.stroke(); ctx.globalAlpha=1; ctx.globalCompositeOperation='source-over'; break; }
+        case 6:{ if(k>=1){ ents.splice(i,1); break; } e.x+=(e.vx||0)*dt*mul; e.y+=(e.vy||-14)*dt*mul; const rs=(e.r1||28)*grow; ctx.globalAlpha=0.22*fade; ctx.fillStyle=e.col; ctx.beginPath(); ctx.arc(e.x,e.y,rs,0,6.283); ctx.fill(); ctx.globalAlpha=1; break; }
+        case 7:{ if(k>=1){ ents.splice(i,1); break; } const y2=e.y+(e.vy||240)*k*mul*0.65; ctx.globalCompositeOperation='lighter'; ctx.globalAlpha=0.30*fade; ctx.strokeStyle=e.col; ctx.lineWidth=1.4; ctx.beginPath(); ctx.moveTo(e.x, y2); ctx.lineTo(e.x, y2 + (e.len||22)); ctx.stroke(); ctx.globalAlpha=1; ctx.globalCompositeOperation='source-over'; break; }
+        case 8:{ if(k>=1){ ents.splice(i,1); break; } const dist=(e.dist||160)*grow; const ex=e.x+Math.cos(e.ang||0)*dist; const ey=e.y+Math.sin(e.ang||0)*dist; ctx.globalCompositeOperation='lighter'; ctx.globalAlpha=0.86*fade; ctx.fillStyle=e.col; ctx.fillRect(ex-1, ey-1, 2, 2); ctx.globalAlpha=1; ctx.globalCompositeOperation='source-over'; break; }
+        case 9:{ if(k>=1){ ents.splice(i,1); break; } e.x+=(e.vx||0)*dt*mul; e.y+=(e.vy||-95)*dt*mul; const br=(e.r1||14)*grow; ctx.globalCompositeOperation='lighter'; ctx.globalAlpha=0.30*fade; ctx.strokeStyle=e.col; ctx.lineWidth=1.6; ctx.beginPath(); ctx.arc(e.x,e.y,br,0,6.283); ctx.stroke(); ctx.globalAlpha=1; ctx.globalCompositeOperation='source-over'; break; }
+      }
+    }
+  }
+
+  // Spawner during drawing
+  function spawnEffect(x,y,velNorm){
+    const lifeScale = 1 + Math.min(1.5, velNorm*1.8);
+    const col = pick(theme.cols || ['#fff']);
+    switch(effectMode){
+      case 0:{ addRipple(x,y, 1.6*lifeScale, rnd(120,200), rnd(1.2,2.2), col); break; }
+      case 1:{ const petals=14+(velNorm*12|0),R=rnd(46,82); for(let i=0;i<petals;i++){ const ang=(i/petals)*6.283+rnd(-.08,.08); addPetal(x,y, 1.8*lifeScale, Math.cos(ang)*R, Math.sin(ang)*R, ang+1.57, rnd(10,14), rnd(18,26), `hsl(${(i*15)%360} 85% 70%)`);} addCenterPuff(x,y,1.6*lifeScale, rnd(34,56), col); break; }
+      case 2:{ addDissolve(x,y, 1.6*lifeScale, rnd(40,80), col); break; }
+      case 3:{ const n=7+(velNorm*10|0); for(let i=0;i<n;i++) addSpark(x,y, 1.3*lifeScale, rnd(-90,90), rnd(-90,90), rnd(1.4,2.4), col); break; }
+      case 4:{ const n=8+(velNorm*12|0); for(let i=0;i<n;i++) addFirefly(x,y, 1.5*lifeScale, rnd(-36,36), rnd(-36,36), rnd(2.5,4.5), col); break; }
+      case 5:{ addAurora(x,y, 1.8*lifeScale, rnd(110,180), rnd(10,18), rnd(0.010,0.016), col); break; }
+      case 6:{ const n=4+(velNorm*6|0); for(let i=0;i<n;i++) addSmoke(x,y, 1.8*lifeScale, rnd(-18,18), rnd(-18,-10), rnd(22,34), col); break; }
+      case 7:{ const n=7+(velNorm*12|0); for(let i=0;i<n;i++) addRain(x,y, 1.2*lifeScale, rnd(200,280), rnd(16,28), col); break; }
+      case 8:{ const n=14+(velNorm*20|0); for(let i=0;i<n;i++) addStar(x,y, 1.4*lifeScale, rnd(0,6.283), rnd(100,200), col); break; }
+      case 9:{ const n=7+(velNorm*10|0); for(let i=0;i<n;i++) addBubble(x,y, 1.7*lifeScale, rnd(-22,22), rnd(-110,-70), rnd(10,18), col); break; }
+    }
+  }
+
+  // Input
+  const pointers = new Map();
+  function nowMS(){ return performance.now(); }
+  function getXYClient(clientX, clientY){ const r=canvas.getBoundingClientRect(); return {x: clientX - r.left, y: clientY - r.top}; }
+  function handleDownXY(x,y,id=0){
+    const t=nowMS();
+    const o={x,y,t,lastVel:0,path: drawMode? makePath(id,x,y): null};
+    pointers.set(id,o);
+    spawnEffect(x,y,0.25);
+  }
+  function handleMoveXY(x,y,id=0){
+    if(!pointers.has(id)) return;
+    const P=pointers.get(id);
+    const t=nowMS();
+    const dt=Math.max(1, t-P.t);
+    const dx=x-P.x, dy=y-P.y, dist=Math.hypot(dx,dy);
+    const vel = (dist/(dt/1000));
+    const velNorm = Math.min(1.2, vel/1200);
+    const steps=Math.max(1, Math.min(36, Math.floor(dist/3.5)));
+    for(let i=1;i<=steps;i++){
+      const tt=i/steps; const ex=P.x+dx*tt, ey=P.y+dy*tt;
+      if(P.path) addPoint(P.path, ex, ey);
+      spawnEffect(ex,ey, velNorm);
+    }
+    P.x=x; P.y=y; P.t=t; P.lastVel=velNorm;
+  }
+  function handleUpXY(id=0){
+    if(!pointers.has(id)) return; const P=pointers.get(id);
+    if(P.path) endPath(P.path);
+    pointers.delete(id);
+  }
+
+  // Bind pointer events
+  canvas.addEventListener('pointerdown', (e)=>{ e.preventDefault(); const p=getXYClient(e.clientX,e.clientY); try{canvas.setPointerCapture(e.pointerId);}catch(_){} handleDownXY(p.x,p.y,e.pointerId); }, {passive:false});
+  canvas.addEventListener('pointermove', (e)=>{ e.preventDefault(); const p=getXYClient(e.clientX,e.clientY); handleMoveXY(p.x,p.y,e.pointerId); }, {passive:false});
+  canvas.addEventListener('pointerup',   (e)=>{ e.preventDefault(); handleUpXY(e.pointerId); }, {passive:false});
+  canvas.addEventListener('pointercancel',(e)=>{ e.preventDefault(); handleUpXY(e.pointerId); }, {passive:false});
+
+  // RAF loop (single timeNow variable)
+  let last = performance.now();
+  function loop(now){
+    const dt=Math.min(0.05, Math.max(0.008, (now-last)/1000)); last=now;
+    timeNow += dt * speedMul;
+    drawBG();
+    updateAfterglows(dt);
+    drawEntities(dt);
+    drawPaths();
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+
+  // Recorder (10s max)
+  const recBtn = document.getElementById('recBtn');
+  const recLabel = document.getElementById('recLabel');
+  const recTime = document.getElementById('recTime');
+  const dlBtn = document.getElementById('dlBtn');
+
+  let recorder=null, chunks=[], recTimer=null, recStart=0;
+  function startRec(){
+    try{
+      const stream = canvas.captureStream(60);
+      const mime = MediaRecorder.isTypeSupported('video/webm;codecs=vp9') ? 'video/webm;codecs=vp9' :
+                   MediaRecorder.isTypeSupported('video/webm;codecs=vp8') ? 'video/webm;codecs=vp8' : 'video/webm';
+      recorder = new MediaRecorder(stream, {mimeType: mime, videoBitsPerSecond: 8_000_000});
+      chunks = [];
+      recorder.ondataavailable = e => { if(e.data && e.data.size) chunks.push(e.data); };
+      recorder.onstop = ()=>{
+        const blob = new Blob(chunks, {type: mime});
+        const url = URL.createObjectURL(blob);
+        dlBtn.href = url; dlBtn.style.display='inline-flex';
+        recLabel.textContent='Record'; recBtn.innerHTML='⏺️ '; recBtn.appendChild(recLabel); recBtn.appendChild(recTime);
+        clearInterval(recTimer); recTimer=null; recorder=null;
+      };
+      recorder.start();
+      recStart = performance.now();
+      recLabel.textContent='Recording';
+      recBtn.innerHTML='⏹️ '; recBtn.appendChild(recLabel); recBtn.appendChild(recTime);
+      dlBtn.style.display='none';
+      recTimer = setInterval(()=>{
+        const t = (performance.now()-recStart)/1000;
+        recTime.textContent = (t>10?10:t).toFixed(1).padStart(4,'0');
+        if(t>=10){ stopRec(); }
+      }, 100);
+    }catch(err){ alert('Recording failed: '+err); }
+  }
+  function stopRec(){ try{ recorder && recorder.state!=='inactive' && recorder.stop(); }catch(_){} if(recTimer){ clearInterval(recTimer); recTimer=null; } }
+  recBtn.addEventListener('click', ()=>{ if(!recorder){ startRec(); } else { stopRec(); } });
+
+})();
+</script>
+</body>
+</html>
